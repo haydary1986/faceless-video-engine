@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from typing import Optional
 import subprocess
 import requests
 import uuid
@@ -15,10 +16,13 @@ def read_root():
 
 class Scene(BaseModel):
     image_url: str
-    audio_url: str
+    text: Optional[str] = None
+    audio_url: Optional[str] = None
 
 class VideoRequest(BaseModel):
     scenes: list[Scene]
+    elevenlabs_api_key: Optional[str] = None
+    voice_id: str = "EXAVITQu4vr4xnSDxMaL" # Default Arabic/Multi voice
 
 @app.post("/generate-video")
 def generate_video(req: VideoRequest):
@@ -34,13 +38,33 @@ def generate_video(req: VideoRequest):
             aud_path = f"{work_dir}/aud_{i}.mp3"
             clip_path = f"{work_dir}/clip_{i}.mp4"
             
-            # تحميل الصورة والصوت من الروابط
+            # 1. Download Image
             with open(img_path, 'wb') as f:
                 f.write(requests.get(scene.image_url).content)
-            with open(aud_path, 'wb') as f:
-                f.write(requests.get(scene.audio_url).content)
                 
-            # دمج الصورة والصوت باستخدام FFmpeg
+            # 2. Get Audio (Either from URL or Generate via ElevenLabs)
+            if scene.audio_url:
+                with open(aud_path, 'wb') as f:
+                    f.write(requests.get(scene.audio_url).content)
+            elif scene.text and req.elevenlabs_api_key:
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{req.voice_id}"
+                headers = {
+                    "xi-api-key": req.elevenlabs_api_key, 
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "text": scene.text, 
+                    "model_id": "eleven_multilingual_v2"
+                }
+                res = requests.post(url, json=data, headers=headers)
+                if res.status_code != 200:
+                    raise Exception(f"ElevenLabs Error: {res.text}")
+                with open(aud_path, 'wb') as f:
+                    f.write(res.content)
+            else:
+                raise Exception("Scene must have either audio_url or (text + elevenlabs_api_key)")
+                
+            # 3. Merge Audio and Image
             cmd = [
                 "ffmpeg", "-y", "-loop", "1", "-i", img_path, "-i", aud_path,
                 "-vf", "scale=1080:1920:force_original_aspect_ratio=crop,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
@@ -50,7 +74,7 @@ def generate_video(req: VideoRequest):
             subprocess.run(cmd, check=True)
             clips.append(clip_path)
             
-        # دمج المشاهد
+        # 4. Concat all scenes
         concat_file = f"{work_dir}/concat.txt"
         with open(concat_file, 'w') as f:
             for clip in clips:
@@ -71,4 +95,3 @@ def generate_video(req: VideoRequest):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
